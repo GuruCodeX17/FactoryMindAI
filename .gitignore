@@ -1,0 +1,45 @@
+
+# Python-generated files
+__pycache__/
+*.py[cod]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local databases and generated data
+qdrant_storage/
+data/raw/
+knowledge_base/raw/
+knowledge_base/processed/
+
+# Logs
+*.log
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local databases
+qdrant_storage/
+
+# Datasets
+data/raw/
+knowledge_base/raw/
+knowledge_base/processed/
+
+# Logs
+*.log
