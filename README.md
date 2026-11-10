@@ -1,4 +1,3 @@
-@'
 # FactoryMind AI
 
 An AI-powered industrial predictive maintenance assistant that combines machine learning, Retrieval-Augmented Generation (RAG), and agent-based workflows.
