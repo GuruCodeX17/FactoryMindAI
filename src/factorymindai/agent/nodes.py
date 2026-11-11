@@ -1,3 +1,4 @@
+
 import re
 from contextlib import AsyncExitStack
 
@@ -9,7 +10,14 @@ from src.factorymindai.mcp_client import (
 )
 from src.factorymindai.agent.state import FactoryMindState
 from src.factorymindai.rag.generator import generate_rag_answer
+from src.factorymindai.services.prediction_service import (
+    predict_machine_failure
+)
 
+
+# ============================================================
+# 1. RAG NODE
+# ============================================================
 
 def rag_node(state: FactoryMindState) -> dict:
     """
@@ -20,9 +28,7 @@ def rag_node(state: FactoryMindState) -> dict:
     top_k = state.get("top_k", 3)
 
     if not question:
-        return {
-            "error": "Question cannot be empty."
-        }
+        return {"error": "Question cannot be empty."}
 
     try:
         result = generate_rag_answer(
@@ -41,10 +47,10 @@ def rag_node(state: FactoryMindState) -> dict:
             "error": f"RAG processing failed: {error}"
         }
 
-from src.factorymindai.services.prediction_service import (
-    predict_machine_failure
-)
 
+# ============================================================
+# 2. ML PREDICTION NODE
+# ============================================================
 
 def prediction_node(state: FactoryMindState) -> dict:
     """
@@ -66,7 +72,9 @@ def prediction_node(state: FactoryMindState) -> dict:
             "final_answer": (
                 f"{result['status']}. "
                 f"Failure probability: "
-                f"{result['failure_probability']:.2%}."
+                f"{result['failure_probability']:.2%}. "
+                "This is a model estimate, not a guarantee "
+                "that the machine is safe."
             )
         }
 
@@ -76,9 +84,14 @@ def prediction_node(state: FactoryMindState) -> dict:
         }
 
 
+# ============================================================
+# 3. SUPERVISOR NODE
+# ============================================================
+
 def supervisor_node(state: FactoryMindState) -> dict:
     """
-    Classify the user request and select the appropriate agent or MCP tool.
+    Classify the user request and select the appropriate
+    agent or MCP tool.
     """
 
     question = state.get("question", "").strip().lower()
@@ -91,15 +104,31 @@ def supervisor_node(state: FactoryMindState) -> dict:
         }
 
     # Extract machine ID and part ID
-    machine_match = re.search(r"\bM-\d{3}\b", question, re.IGNORECASE)
-    part_match = re.search(r"\bP-\d{3}\b", question, re.IGNORECASE)
+    machine_match = re.search(
+        r"\bM-\d{3}\b",
+        question,
+        re.IGNORECASE
+    )
 
-    machine_id = machine_match.group().upper() if machine_match else None
-    part_id = part_match.group().upper() if part_match else None
+    part_match = re.search(
+        r"\bP-\d{3}\b",
+        question,
+        re.IGNORECASE
+    )
 
-    # -----------------------------------
-    # 1. MAINTENANCE MCP ROUTING
-    # -----------------------------------
+    machine_id = (
+        machine_match.group().upper()
+        if machine_match else None
+    )
+
+    part_id = (
+        part_match.group().upper()
+        if part_match else None
+    )
+
+    # --------------------------------------------------------
+    # 3.1 MAINTENANCE MCP ROUTING
+    # --------------------------------------------------------
 
     if any(word in question for word in [
         "machine status",
@@ -145,9 +174,9 @@ def supervisor_node(state: FactoryMindState) -> dict:
             }
         }
 
-    # -----------------------------------
-    # 2. INVENTORY MCP ROUTING
-    # -----------------------------------
+    # --------------------------------------------------------
+    # 3.2 INVENTORY MCP ROUTING
+    # --------------------------------------------------------
 
     if any(word in question for word in [
         "stock availability",
@@ -217,6 +246,7 @@ def supervisor_node(state: FactoryMindState) -> dict:
                 }
             }
 
+    # Spare parts search
     if any(word in question for word in [
         "spare parts",
         "inventory",
@@ -251,9 +281,9 @@ def supervisor_node(state: FactoryMindState) -> dict:
             }
         }
 
-    # -----------------------------------
-    # 3. ML PREDICTION ROUTING
-    # -----------------------------------
+    # --------------------------------------------------------
+    # 3.3 ML PREDICTION AND RAG ROUTING
+    # --------------------------------------------------------
 
     prediction_keywords = [
         "predict",
@@ -305,9 +335,120 @@ def supervisor_node(state: FactoryMindState) -> dict:
         "intent": intent
     }
 
+
+# ============================================================
+# 4. MCP RESPONSE FORMATTER
+# ============================================================
+
+def format_mcp_response(tool_name: str, result: dict) -> str:
+    """
+    Convert structured MCP tool results into readable responses.
+    """
+
+    if not isinstance(result, dict):
+        return f"MCP tool completed. Result: {result}"
+
+    # Machine status
+    if tool_name == "get_machine_status":
+
+        machine_id = result.get("machine_id", "Unknown")
+        status = result.get("status", "Unknown")
+        temperature = result.get("temperature", "Not available")
+        vibration = result.get("vibration", "Not available")
+
+        return (
+            f"Machine {machine_id} is currently in {status} status.\n"
+            f"Temperature: {temperature}\n"
+            f"Vibration: {vibration}\n"
+            "Please review these readings as part of the maintenance check."
+        )
+
+    # Maintenance history
+    if tool_name == "get_maintenance_history":
+
+        machine_id = result.get("machine_id", "Unknown")
+        records = result.get("history", result.get("records", []))
+
+        return (
+            f"Maintenance history retrieved for machine {machine_id}.\n"
+            f"Records: {records if records else result}"
+        )
+
+    # Stock availability
+    if tool_name == "check_stock_availability":
+
+        part_name = result.get(
+            "part_name",
+            result.get("part_id", "Unknown part")
+        )
+
+        available_quantity = result.get("available_quantity", 0)
+        requested_quantity = result.get("requested_quantity", 1)
+        available = result.get("available", False)
+
+        if available:
+            return (
+                f"{part_name} is available in stock.\n"
+                f"Available quantity: {available_quantity}\n"
+                f"Requested quantity: {requested_quantity}"
+            )
+
+        return (
+            f"Insufficient stock for {part_name}.\n"
+            f"Available quantity: {available_quantity}\n"
+            f"Requested quantity: {requested_quantity}\n"
+            "Please check inventory or arrange replenishment."
+        )
+
+    # Spare parts search
+    if tool_name == "search_spare_parts":
+
+        parts = result.get("parts", [])
+
+        if not parts:
+            return "No matching spare parts were found."
+
+        lines = ["Matching spare parts found:"]
+
+        for part in parts:
+            lines.append(
+                f"- {part.get('part_name', 'Unknown part')} "
+                f"(ID: {part.get('part_id', 'Unknown')}) | "
+                f"Quantity: {part.get('quantity', 'Unknown')} | "
+                f"Price: INR {part.get('unit_price', 'Unknown')}"
+            )
+
+        return "\n".join(lines)
+
+    # Required parts for maintenance tasks
+    if tool_name == "get_part_requirements":
+
+        task = result.get("maintenance_task", "Unknown")
+        parts = result.get("parts", result.get("required_parts", []))
+
+        return (
+            f"Spare part requirements retrieved successfully.\n"
+            f"Maintenance task: {task}\n"
+            f"Required parts: {parts if parts else result}"
+        )
+
+    # Generic fallback
+    lines = ["MCP tool executed successfully."]
+
+    for key, value in result.items():
+        readable_key = key.replace("_", " ").title()
+        lines.append(f"{readable_key}: {value}")
+
+    return "\n".join(lines)
+
+
+# ============================================================
+# 5. MCP NODE
+# ============================================================
+
 async def mcp_node(state: FactoryMindState) -> dict:
     """
-    Execute an MCP tool using the selected MCP server.
+    Execute an MCP tool and generate a readable response.
     """
 
     server_name = state.get("mcp_server")
@@ -348,12 +489,15 @@ async def mcp_node(state: FactoryMindState) -> dict:
                 arguments=arguments
             )
 
+        # Convert MCP result into a readable response
+        formatted_answer = format_mcp_response(
+            tool_name=tool_name,
+            result=result
+        )
+
         return {
             "mcp_result": result,
-            "final_answer": (
-                f"MCP tool executed successfully: {tool_name}\n"
-                f"Result: {result}"
-            )
+            "final_answer": formatted_answer
         }
 
     except Exception as error:
