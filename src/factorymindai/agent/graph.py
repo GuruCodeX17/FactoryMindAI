@@ -6,23 +6,22 @@ from src.factorymindai.agent.state import FactoryMindState
 from src.factorymindai.agent.nodes import (
     supervisor_node,
     rag_node,
-    prediction_node
+    prediction_node,
+    mcp_node
 )
 
 
-# Fallback node for unknown questions
 def unknown_node(state: FactoryMindState) -> dict:
     return {
         "final_answer": (
             "I'm FactoryMind AI, an industrial predictive "
             "maintenance assistant. I can help with machine "
-            "failure prediction and maintenance knowledge. "
-            "Please provide a relevant question."
+            "failure prediction, maintenance knowledge, "
+            "machine status and inventory information."
         )
     }
 
 
-# Combine ML prediction and RAG results
 def combined_response_node(state: FactoryMindState) -> dict:
 
     prediction = state.get("prediction", {})
@@ -32,9 +31,7 @@ def combined_response_node(state: FactoryMindState) -> dict:
         "status", "Prediction unavailable"
     )
 
-    probability = prediction.get(
-        "failure_probability"
-    )
+    probability = prediction.get("failure_probability")
 
     rag_answer = rag_result.get(
         "answer", "No maintenance information retrieved."
@@ -48,28 +45,30 @@ def combined_response_node(state: FactoryMindState) -> dict:
     else:
         prediction_text = prediction_status
 
-    final_answer = (
-        f"Machine Analysis:\n{prediction_text}\n\n"
-        f"Maintenance Guidance:\n{rag_answer}"
-    )
-
     return {
-        "final_answer": final_answer
+        "final_answer": (
+            f"Machine Analysis:\n{prediction_text}\n\n"
+            f"Maintenance Guidance:\n{rag_answer}"
+        )
     }
 
 
-# Routing after Supervisor
 def route_intent(state: FactoryMindState) -> str:
 
     intent = state.get("intent", "unknown")
 
-    if intent in ["rag", "prediction", "combined"]:
+    if intent in [
+        "rag",
+        "prediction",
+        "combined",
+        "maintenance",
+        "inventory"
+    ]:
         return intent
 
     return "unknown"
 
 
-# Decide what happens after ML prediction
 def route_after_prediction(state: FactoryMindState) -> str:
 
     if state.get("intent") == "combined":
@@ -78,7 +77,6 @@ def route_after_prediction(state: FactoryMindState) -> str:
     return "end"
 
 
-# Decide what happens after RAG
 def route_after_rag(state: FactoryMindState) -> str:
 
     if state.get("intent") == "combined":
@@ -87,23 +85,20 @@ def route_after_rag(state: FactoryMindState) -> str:
     return "end"
 
 
-# Initialize graph
 workflow = StateGraph(FactoryMindState)
-
 
 # Register nodes
 workflow.add_node("supervisor", supervisor_node)
 workflow.add_node("rag", rag_node)
 workflow.add_node("prediction", prediction_node)
+workflow.add_node("mcp", mcp_node)
 workflow.add_node("combined_response", combined_response_node)
 workflow.add_node("unknown", unknown_node)
 
-
-# Entry point
+# Starting point
 workflow.add_edge(START, "supervisor")
 
-
-# Conditional routing from Supervisor
+# Supervisor routing
 workflow.add_conditional_edges(
     "supervisor",
     route_intent,
@@ -111,12 +106,13 @@ workflow.add_conditional_edges(
         "rag": "rag",
         "prediction": "prediction",
         "combined": "prediction",
+        "maintenance": "mcp",
+        "inventory": "mcp",
         "unknown": "unknown"
     }
 )
 
-
-# Conditional routing after prediction
+# Prediction routing
 workflow.add_conditional_edges(
     "prediction",
     route_after_prediction,
@@ -126,8 +122,7 @@ workflow.add_conditional_edges(
     }
 )
 
-
-# Conditional routing after RAG
+# RAG routing
 workflow.add_conditional_edges(
     "rag",
     route_after_rag,
@@ -137,11 +132,11 @@ workflow.add_conditional_edges(
     }
 )
 
+# MCP execution ends the current workflow
+workflow.add_edge("mcp", END)
 
-# Final connections
 workflow.add_edge("combined_response", END)
 workflow.add_edge("unknown", END)
-
 
 # Compile graph
 factorymind_graph = workflow.compile()

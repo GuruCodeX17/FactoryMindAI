@@ -8,7 +8,14 @@ class FactoryMindState(TypedDict, total=False):
     question: str
 
     # Agent routing decision
-    intent: Literal["rag", "prediction", "combined", "unknown"]
+    intent: Literal[
+        "rag",
+        "prediction",
+        "combined",
+        "maintenance",
+        "inventory",
+        "unknown"
+    ]
 
     # Machine sensor input
     machine_data: dict[str, Any]
@@ -21,6 +28,14 @@ class FactoryMindState(TypedDict, total=False):
 
     # RAG output
     rag_result: dict[str, Any]
+
+    # MCP tool selection
+    mcp_server: str
+    mcp_tool: str
+    mcp_arguments: dict[str, Any]
+
+    # MCP execution output
+    mcp_result: dict[str, Any]
 
     # Final response
     final_answer: str

@@ -29,17 +29,17 @@ class AgentRequest(BaseModel):
 
 # Agent API endpoint
 @router.post("/ask")
-def ask_agent(request: AgentRequest):
+async def ask_agent(request: AgentRequest):
     try:
         # Convert machine data into a dictionary
         machine_data = (
             request.machine_data.model_dump()
-            if request.machine_data
+            if request.machine_data is not None
             else None
         )
 
-        # Invoke the LangGraph workflow
-        result = factorymind_graph.invoke({
+        # Execute the asynchronous LangGraph workflow
+        result = await factorymind_graph.ainvoke({
             "question": request.question,
             "machine_data": machine_data,
             "top_k": request.top_k
