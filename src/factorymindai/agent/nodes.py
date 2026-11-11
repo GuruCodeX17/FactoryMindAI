@@ -4,12 +4,19 @@ from contextlib import AsyncExitStack
 
 from mcp import Client
 
+from src.factorymindai.agent.state import FactoryMindState
+from src.factorymindai.agent.schemas import SupervisorDecision
+
 from src.factorymindai.mcp_client import (
     create_server_parameters,
     call_mcp_tool
 )
-from src.factorymindai.agent.state import FactoryMindState
-from src.factorymindai.rag.generator import generate_rag_answer
+
+from src.factorymindai.rag.generator import (
+    get_llm,
+    generate_rag_answer
+)
+
 from src.factorymindai.services.prediction_service import (
     predict_machine_failure
 )
@@ -90,11 +97,11 @@ def prediction_node(state: FactoryMindState) -> dict:
 
 def supervisor_node(state: FactoryMindState) -> dict:
     """
-    Classify the user request and select the appropriate
-    agent or MCP tool.
+    Use Groq LLM to classify user requests and select
+    the appropriate agent or MCP tool.
     """
 
-    question = state.get("question", "").strip().lower()
+    question = state.get("question", "").strip()
     machine_data = state.get("machine_data")
 
     if not question:
@@ -103,7 +110,10 @@ def supervisor_node(state: FactoryMindState) -> dict:
             "error": "Question cannot be empty."
         }
 
-    # Extract machine ID and part ID
+    # --------------------------------------------------------
+    # Extract machine and part IDs using Python
+    # --------------------------------------------------------
+
     machine_match = re.search(
         r"\bM-\d{3}\b",
         question,
@@ -127,208 +137,363 @@ def supervisor_node(state: FactoryMindState) -> dict:
     )
 
     # --------------------------------------------------------
-    # 3.1 MAINTENANCE MCP ROUTING
+    # Groq LLM structured-output classification
     # --------------------------------------------------------
 
-    if any(word in question for word in [
-        "machine status",
-        "status of",
-        "current status",
-        "machine condition"
-    ]):
-
-        if not machine_id:
-            return {
-                "intent": "unknown",
-                "error": "Please provide a machine ID, such as M-002."
-            }
-
-        return {
-            "intent": "maintenance",
-            "mcp_server": "maintenance",
-            "mcp_tool": "get_machine_status",
-            "mcp_arguments": {
-                "machine_id": machine_id
-            }
-        }
-
-    if any(word in question for word in [
-        "maintenance history",
-        "previous maintenance",
-        "maintenance records",
-        "service history"
-    ]):
-
-        if not machine_id:
-            return {
-                "intent": "unknown",
-                "error": "Please provide a machine ID, such as M-002."
-            }
-
-        return {
-            "intent": "maintenance",
-            "mcp_server": "maintenance",
-            "mcp_tool": "get_maintenance_history",
-            "mcp_arguments": {
-                "machine_id": machine_id
-            }
-        }
-
-    # --------------------------------------------------------
-    # 3.2 INVENTORY MCP ROUTING
-    # --------------------------------------------------------
-
-    if any(word in question for word in [
-        "stock availability",
-        "in stock",
-        "stock of",
-        "available quantity"
-    ]):
-
-        if not part_id:
-            return {
-                "intent": "unknown",
-                "error": "Please provide a part ID, such as P-001."
-            }
-
-        quantity_match = re.search(
-            r"\bquantity\s*(\d+)\b|\b(\d+)\s*(?:units|pieces)\b",
-            question
+    try:
+        llm = get_llm().with_structured_output(
+            SupervisorDecision,
+            method="json_schema",
+            strict=False
         )
 
-        requested_quantity = 1
+        prompt = f"""
+        You are the supervisor of FactoryMindAI, an industrial
+        predictive maintenance agent system.
 
-        if quantity_match:
-            requested_quantity = int(
-                quantity_match.group(1) or quantity_match.group(2)
-            )
+        Classify the user's request.
 
+        Available intents:
+        rag, prediction, combined, maintenance,
+        inventory, unknown.
+
+        Available MCP tools:
+
+        Maintenance server:
+        - get_machine_status
+        - get_maintenance_history
+
+        Inventory server:
+        - check_stock_availability
+        - get_part_requirements
+        - search_spare_parts
+
+        Rules:
+        1. Machine status questions must select
+           get_machine_status.
+        2. Maintenance history questions must select
+           get_maintenance_history.
+        3. Stock availability questions must select
+           check_stock_availability.
+        4. Spare part requirement questions must select
+           get_part_requirements.
+        5. Spare parts search questions must select
+           search_spare_parts.
+        6. For MCP requests, select the exact tool name.
+        7. Never invent machine IDs or part IDs.
+        8. For non-MCP requests, use mcp_tool="none".
+        9. Do not create maintenance work orders.
+        10. General troubleshooting questions should use RAG.
+        11. If the user requests prediction and maintenance
+            recommendations together, select combined.
+
+        User question: {question}
+        """
+
+        decision = llm.invoke(prompt)
+
+    except Exception as exc:
         return {
-            "intent": "inventory",
-            "mcp_server": "inventory",
-            "mcp_tool": "check_stock_availability",
-            "mcp_arguments": {
-                "part_id": part_id,
-                "requested_quantity": requested_quantity
-            }
+            "intent": "unknown",
+            "error": f"Supervisor LLM error: {str(exc)}"
         }
 
-    # Maintenance task to required spare parts mapping
-    maintenance_tasks = {
-        "bearing_replacement": [
-            "bearing replacement",
-            "replace bearing"
-        ],
-        "cooling_system_repair": [
-            "cooling system repair",
-            "repair cooling system"
-        ],
-        "hydraulic_system_repair": [
-            "hydraulic system repair",
-            "repair hydraulic system"
-        ],
-        "temperature_sensor_replacement": [
-            "temperature sensor replacement",
-            "replace temperature sensor"
-        ]
-    }
+    intent = decision.intent
+    mcp_server = decision.mcp_server
+    mcp_tool = decision.mcp_tool
+    arguments = decision.arguments or {}
 
-    for task, phrases in maintenance_tasks.items():
-
-        if any(phrase in question for phrase in phrases):
-
-            return {
-                "intent": "inventory",
-                "mcp_server": "inventory",
-                "mcp_tool": "get_part_requirements",
-                "mcp_arguments": {
-                    "maintenance_task": task
-                }
-            }
-
-    # Spare parts search
-    if any(word in question for word in [
-        "spare parts",
-        "inventory",
-        "search parts",
-        "find parts"
-    ]):
-
-        search_terms = [
-            "electrical",
-            "mechanical",
-            "hydraulic",
-            "ball bearing",
-            "cooling fan",
-            "hydraulic pump",
-            "temperature sensor"
-        ]
-
-        search_query = next(
-            (
-                term for term in search_terms
-                if term in question
-            ),
-            ""
-        )
-
-        return {
-            "intent": "inventory",
-            "mcp_server": "inventory",
-            "mcp_tool": "search_spare_parts",
-            "mcp_arguments": {
-                "search_query": search_query
-            }
-        }
+    question_lower = question.lower()
 
     # --------------------------------------------------------
-    # 3.3 ML PREDICTION AND RAG ROUTING
+    # Deterministic routing safeguards
     # --------------------------------------------------------
 
     prediction_keywords = [
         "predict",
         "prediction",
-        "failure risk",
         "failure probability",
-        "machine failure",
-        "will fail",
-        "sensor anomaly",
-        "anomaly detection"
+        "failure risk",
+        "machine failure"
     ]
 
-    rag_keywords = [
-        "maintenance",
-        "preventive",
-        "troubleshoot",
+    recommendation_keywords = [
         "recommend",
+        "recommendation",
+        "preventive maintenance",
+        "maintenance action",
         "what should i do",
-        "repair",
-        "root cause",
-        "diagnose",
-        "equipment manual",
-        "maintenance procedure"
+        "what maintenance action",
+        "troubleshoot",
+        "how can i"
     ]
 
     needs_prediction = any(
-        keyword in question
+        keyword in question_lower
         for keyword in prediction_keywords
     )
 
-    needs_rag = any(
-        keyword in question
-        for keyword in rag_keywords
+    needs_recommendation = any(
+        keyword in question_lower
+        for keyword in recommendation_keywords
     )
 
-    if needs_prediction and needs_rag and machine_data:
+    # Combined workflow takes priority when sensor data exists
+    if (
+        needs_prediction
+        and needs_recommendation
+        and machine_data
+    ):
         intent = "combined"
+        mcp_tool = "none"
+        mcp_server = "none"
 
-    elif needs_prediction:
-        intent = "prediction"
+    # General troubleshooting belongs to RAG
+    elif (
+        not machine_id
+        and needs_recommendation
+        and not needs_prediction
+    ):
+        intent = "rag"
+        mcp_tool = "none"
+        mcp_server = "none"
 
-    elif needs_rag:
+    # --------------------------------------------------------
+    # Validate MCP tool selection
+    # --------------------------------------------------------
+
+    maintenance_tools = {
+        "get_machine_status",
+        "get_maintenance_history"
+    }
+
+    inventory_tools = {
+        "check_stock_availability",
+        "get_part_requirements",
+        "search_spare_parts"
+    }
+
+    # Infer a tool if the LLM did not select one
+    if mcp_tool == "none":
+
+        if intent == "maintenance":
+
+            if any(
+                word in question_lower
+                for word in [
+                    "history",
+                    "previous maintenance",
+                    "service records"
+                ]
+            ):
+                mcp_tool = "get_maintenance_history"
+
+            else:
+                mcp_tool = "get_machine_status"
+
+        elif intent == "inventory":
+
+            if any(
+                word in question_lower
+                for word in [
+                    "stock",
+                    "availability",
+                    "quantity",
+                    "in stock"
+                ]
+            ):
+                mcp_tool = "check_stock_availability"
+
+            elif any(
+                word in question_lower
+                for word in [
+                    "requirement",
+                    "replacement",
+                    "repair"
+                ]
+            ):
+                mcp_tool = "get_part_requirements"
+
+            else:
+                mcp_tool = "search_spare_parts"
+
+    # --------------------------------------------------------
+    # Maintenance MCP validation
+    # --------------------------------------------------------
+
+    if mcp_tool in maintenance_tools:
+
+        if intent != "maintenance" or not machine_id:
+            return {
+                "intent": "unknown",
+                "error": "A valid machine ID is required."
+            }
+
+        return {
+            "intent": "maintenance",
+            "mcp_server": "maintenance",
+            "mcp_tool": mcp_tool,
+            "mcp_arguments": {
+                "machine_id": machine_id
+            }
+        }
+
+    # --------------------------------------------------------
+    # Inventory MCP validation
+    # --------------------------------------------------------
+
+    if mcp_tool in inventory_tools:
+
+        if intent != "inventory":
+            return {
+                "intent": "unknown",
+                "error": "Invalid inventory intent."
+            }
+
+        # Stock availability
+        if mcp_tool == "check_stock_availability":
+
+            if not part_id:
+                return {
+                    "intent": "unknown",
+                    "error": (
+                        "Please provide a part ID, "
+                        "such as P-001."
+                    )
+                }
+
+            quantity_match = re.search(
+                r"\bquantity\s*(\d+)\b|"
+                r"\b(\d+)\s*(?:units|pieces)\b",
+                question,
+                re.IGNORECASE
+            )
+
+            requested_quantity = 1
+
+            if quantity_match:
+                requested_quantity = int(
+                    quantity_match.group(1)
+                    or quantity_match.group(2)
+                )
+
+            if not 1 <= requested_quantity <= 10000:
+                return {
+                    "intent": "unknown",
+                    "error": (
+                        "Requested quantity must be "
+                        "between 1 and 10000."
+                    )
+                }
+
+            return {
+                "intent": "inventory",
+                "mcp_server": "inventory",
+                "mcp_tool": mcp_tool,
+                "mcp_arguments": {
+                    "part_id": part_id,
+                    "requested_quantity": requested_quantity
+                }
+            }
+
+        # Required spare parts for maintenance
+        if mcp_tool == "get_part_requirements":
+
+            maintenance_tasks = {
+                "bearing_replacement": [
+                    "bearing replacement",
+                    "replace bearing"
+                ],
+                "cooling_system_repair": [
+                    "cooling system repair",
+                    "repair cooling system"
+                ],
+                "hydraulic_system_repair": [
+                    "hydraulic system repair",
+                    "repair hydraulic system"
+                ],
+                "temperature_sensor_replacement": [
+                    "temperature sensor replacement",
+                    "replace temperature sensor"
+                ]
+            }
+
+            task = arguments.get("maintenance_task")
+
+            # Verify the LLM's suggested task
+            if task not in maintenance_tasks:
+
+                task = next(
+                    (
+                        task_name
+                        for task_name, phrases
+                        in maintenance_tasks.items()
+                        if any(
+                            phrase in question_lower
+                            for phrase in phrases
+                        )
+                    ),
+                    None
+                )
+
+            if not task:
+                return {
+                    "intent": "unknown",
+                    "error": (
+                        "Please specify a supported "
+                        "maintenance task."
+                    )
+                }
+
+            return {
+                "intent": "inventory",
+                "mcp_server": "inventory",
+                "mcp_tool": mcp_tool,
+                "mcp_arguments": {
+                    "maintenance_task": task
+                }
+            }
+
+        # Spare parts search
+        if mcp_tool == "search_spare_parts":
+
+            search_query = arguments.get(
+                "search_query",
+                ""
+            )
+
+            if not isinstance(search_query, str):
+                search_query = ""
+
+            search_query = search_query.strip()[:100]
+
+            return {
+                "intent": "inventory",
+                "mcp_server": "inventory",
+                "mcp_tool": mcp_tool,
+                "mcp_arguments": {
+                    "search_query": search_query
+                }
+            }
+
+    # --------------------------------------------------------
+    # Reject unexpected MCP tools
+    # --------------------------------------------------------
+
+    if mcp_tool != "none":
+        return {
+            "intent": "unknown",
+            "error": "The selected MCP tool is not allowed."
+        }
+
+    # --------------------------------------------------------
+    # ML Prediction and RAG routing
+    # --------------------------------------------------------
+
+    if intent == "combined" and not machine_data:
         intent = "rag"
 
-    else:
+    if intent not in {"rag", "prediction", "combined"}:
         intent = "unknown"
 
     return {
@@ -340,7 +505,10 @@ def supervisor_node(state: FactoryMindState) -> dict:
 # 4. MCP RESPONSE FORMATTER
 # ============================================================
 
-def format_mcp_response(tool_name: str, result: dict) -> str:
+def format_mcp_response(
+    tool_name: str,
+    result: dict
+) -> str:
     """
     Convert structured MCP tool results into readable responses.
     """
@@ -353,8 +521,14 @@ def format_mcp_response(tool_name: str, result: dict) -> str:
 
         machine_id = result.get("machine_id", "Unknown")
         status = result.get("status", "Unknown")
-        temperature = result.get("temperature", "Not available")
-        vibration = result.get("vibration", "Not available")
+        temperature = result.get(
+            "temperature",
+            "Not available"
+        )
+        vibration = result.get(
+            "vibration",
+            "Not available"
+        )
 
         return (
             f"Machine {machine_id} is currently in {status} status.\n"
@@ -367,7 +541,10 @@ def format_mcp_response(tool_name: str, result: dict) -> str:
     if tool_name == "get_maintenance_history":
 
         machine_id = result.get("machine_id", "Unknown")
-        records = result.get("history", result.get("records", []))
+        records = result.get(
+            "history",
+            result.get("records", [])
+        )
 
         return (
             f"Maintenance history retrieved for machine {machine_id}.\n"
@@ -382,8 +559,16 @@ def format_mcp_response(tool_name: str, result: dict) -> str:
             result.get("part_id", "Unknown part")
         )
 
-        available_quantity = result.get("available_quantity", 0)
-        requested_quantity = result.get("requested_quantity", 1)
+        available_quantity = result.get(
+            "available_quantity",
+            0
+        )
+
+        requested_quantity = result.get(
+            "requested_quantity",
+            1
+        )
+
         available = result.get("available", False)
 
         if available:
@@ -423,11 +608,18 @@ def format_mcp_response(tool_name: str, result: dict) -> str:
     # Required parts for maintenance tasks
     if tool_name == "get_part_requirements":
 
-        task = result.get("maintenance_task", "Unknown")
-        parts = result.get("parts", result.get("required_parts", []))
+        task = result.get(
+            "maintenance_task",
+            "Unknown"
+        )
+
+        parts = result.get(
+            "parts",
+            result.get("required_parts", [])
+        )
 
         return (
-            f"Spare part requirements retrieved successfully.\n"
+            "Spare part requirements retrieved successfully.\n"
             f"Maintenance task: {task}\n"
             f"Required parts: {parts if parts else result}"
         )
@@ -489,7 +681,7 @@ async def mcp_node(state: FactoryMindState) -> dict:
                 arguments=arguments
             )
 
-        # Convert MCP result into a readable response
+        # Convert MCP results into readable responses
         formatted_answer = format_mcp_response(
             tool_name=tool_name,
             result=result
