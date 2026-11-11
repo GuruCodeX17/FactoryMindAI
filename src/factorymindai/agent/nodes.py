@@ -20,11 +20,14 @@ from src.factorymindai.rag.generator import (
 from src.factorymindai.services.prediction_service import (
     predict_machine_failure
 )
+import logging
 
+logger = logging.getLogger(__name__)
 
 # ============================================================
 # 1. RAG NODE
 # ============================================================
+
 
 
 def rag_node(state: FactoryMindState) -> dict:
@@ -33,48 +36,60 @@ def rag_node(state: FactoryMindState) -> dict:
     question and, when available, ML prediction context.
     """
 
-    question = state.get("question", "").strip()
-    top_k = state.get("top_k", 3)
-    prediction = state.get("prediction", {})
+    try:
+        # 1. Validate question
+        question = state.get("question", "")
 
-    if not question:
-        return {
-            "error": "Question cannot be empty."
-        }
+        if not isinstance(question, str) or not question.strip():
+            return {
+                "error": "Question cannot be empty."
+            }
 
-    # Build prediction context when available
-    rag_question = question
+        question = question.strip()
 
-    if prediction:
-        status = prediction.get(
-            "status",
-            "Not available"
-        )
+        # 2. Get state values
+        top_k = state.get("top_k", 3)
+        prediction = state.get("prediction", {})
 
-        probability = prediction.get(
-            "failure_probability"
-        )
+        rag_question = question
 
-        prediction_context = (
-            "\n\nMachine prediction context:\n"
-            f"Machine status: {status}\n"
-        )
+        # 3. Validate prediction structure
+        if isinstance(prediction, dict) and prediction:
 
-        if probability is not None:
-            prediction_context += (
-                f"Estimated failure probability: "
-                f"{probability:.2%}\n"
+            status = prediction.get(
+                "status",
+                "Not available"
             )
 
-        prediction_context += (
-            "Use this prediction context to retrieve "
-            "relevant preventive maintenance guidance. "
-            "Do not treat the prediction as a confirmed failure."
-        )
+            probability = prediction.get(
+                "failure_probability"
+            )
 
-        rag_question += prediction_context
+            prediction_context = (
+                "\n\nMachine prediction context:\n"
+                f"Machine status: {status}\n"
+            )
 
-    try:
+            # 4. Validate probability
+            if (
+                isinstance(probability, (int, float))
+                and not isinstance(probability, bool)
+                and 0 <= probability <= 1
+            ):
+                prediction_context += (
+                    f"Estimated failure probability: "
+                    f"{probability:.2%}\n"
+                )
+
+            prediction_context += (
+                "Use this prediction context to retrieve "
+                "relevant preventive maintenance guidance. "
+                "Do not treat the prediction as a confirmed failure."
+            )
+
+            rag_question += prediction_context
+
+        # 5. Generate RAG response
         result = generate_rag_answer(
             question=rag_question,
             top_k=top_k
@@ -86,10 +101,13 @@ def rag_node(state: FactoryMindState) -> dict:
             "final_answer": result.get("answer", "")
         }
 
-    except Exception as error:
+    except Exception:
+        logger.exception("RAG processing failed")
+
         return {
-            "error": f"RAG processing failed: {error}"
+            "error": "RAG processing failed. Please try again."
         }
+
 
 
 # ============================================================
