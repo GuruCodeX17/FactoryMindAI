@@ -26,20 +26,57 @@ from src.factorymindai.services.prediction_service import (
 # 1. RAG NODE
 # ============================================================
 
+
 def rag_node(state: FactoryMindState) -> dict:
     """
-    Retrieve maintenance knowledge and generate an answer.
+    Retrieve maintenance knowledge using the original
+    question and, when available, ML prediction context.
     """
 
     question = state.get("question", "").strip()
     top_k = state.get("top_k", 3)
+    prediction = state.get("prediction", {})
 
     if not question:
-        return {"error": "Question cannot be empty."}
+        return {
+            "error": "Question cannot be empty."
+        }
+
+    # Build prediction context when available
+    rag_question = question
+
+    if prediction:
+        status = prediction.get(
+            "status",
+            "Not available"
+        )
+
+        probability = prediction.get(
+            "failure_probability"
+        )
+
+        prediction_context = (
+            "\n\nMachine prediction context:\n"
+            f"Machine status: {status}\n"
+        )
+
+        if probability is not None:
+            prediction_context += (
+                f"Estimated failure probability: "
+                f"{probability:.2%}\n"
+            )
+
+        prediction_context += (
+            "Use this prediction context to retrieve "
+            "relevant preventive maintenance guidance. "
+            "Do not treat the prediction as a confirmed failure."
+        )
+
+        rag_question += prediction_context
 
     try:
         result = generate_rag_answer(
-            question=question,
+            question=rag_question,
             top_k=top_k
         )
 
